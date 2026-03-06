@@ -11,7 +11,7 @@ struct MainView: View {
             if !webViewManager.showWebLoginSheet {
                 // Keep the web engine alive but visually hidden in native mode.
                 WebViewContainer(webViewManager: webViewManager)
-                    .frame(width: 1, height: 1)
+                    .ignoresSafeArea()
                     .opacity(0.01)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
@@ -173,7 +173,7 @@ private struct NativeMessagesView: View {
                             .font(.system(size: 28, weight: .medium))
                             .foregroundColor(.white.opacity(0.8))
 
-                        Text(isComposerAvailable ? "Native chat mode is ready." : "Open Web once to log in.")
+                        Text(isComposerAvailable ? "Syncing chat content..." : "Open Web once to log in.")
                             .font(.subheadline.weight(.medium))
                             .foregroundColor(.white.opacity(0.85))
 

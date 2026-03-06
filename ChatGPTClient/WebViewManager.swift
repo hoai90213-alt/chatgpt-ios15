@@ -290,29 +290,55 @@ final class WebViewManager: NSObject, ObservableObject {
               .trim();
           }
 
+          function detectRole(node, fallbackRole) {
+            if (!node) { return fallbackRole || 'assistant'; }
+            var role = node.getAttribute && node.getAttribute('data-message-author-role');
+            if (role) { return role; }
+
+            var testId = node.getAttribute && node.getAttribute('data-testid');
+            if (testId) {
+              if (testId.indexOf('assistant') !== -1) { return 'assistant'; }
+              if (testId.indexOf('user') !== -1) { return 'user'; }
+            }
+
+            var walker = node.parentElement;
+            for (var i = 0; i < 6 && walker; i++) {
+              role = walker.getAttribute && walker.getAttribute('data-message-author-role');
+              if (role) { return role; }
+              walker = walker.parentElement;
+            }
+            return fallbackRole || 'assistant';
+          }
+
           var messages = [];
-          var nodes = document.querySelectorAll('[data-message-author-role]');
+          var seen = new Set();
+          var nodes = document.querySelectorAll('[data-message-author-role], [data-testid^=\"conversation-turn-\"]');
           for (var i = 0; i < nodes.length; i++) {
             var node = nodes[i];
-            var role = node.getAttribute('data-message-author-role') || 'assistant';
+            var role = detectRole(node, 'assistant');
             var content = cleanText(node.innerText || node.textContent || '');
             if (!content) { continue; }
+            if (seen.has(content)) { continue; }
+            seen.add(content);
             messages.push({ role: role, content: content });
           }
 
           if (messages.length === 0) {
-            var fallbackBlocks = document.querySelectorAll('main article');
+            var fallbackBlocks = document.querySelectorAll('main article, main [class*=\"markdown\"], main [data-testid*=\"conversation\"]');
             for (var j = 0; j < fallbackBlocks.length; j++) {
-              var fallbackContent = cleanText(fallbackBlocks[j].innerText || fallbackBlocks[j].textContent || '');
+              var block = fallbackBlocks[j];
+              var fallbackContent = cleanText(block.innerText || block.textContent || '');
               if (!fallbackContent) { continue; }
+              if (seen.has(fallbackContent)) { continue; }
+              seen.add(fallbackContent);
               messages.push({
-                role: j % 2 === 0 ? 'assistant' : 'user',
+                role: detectRole(block, j % 2 === 0 ? 'assistant' : 'user'),
                 content: fallbackContent
               });
             }
           }
 
-          var hasComposer = !!document.querySelector('textarea');
+          var hasComposer = !!document.querySelector('textarea, [contenteditable=\"true\"]');
           return JSON.stringify({
             hasComposer: hasComposer,
             messages: messages.slice(-80)
@@ -325,15 +351,22 @@ final class WebViewManager: NSObject, ObservableObject {
         """
         (function () {
           var textarea = document.querySelector('textarea');
-          if (!textarea) { return 'no_textarea'; }
-
           var prompt = \(promptLiteral);
-          textarea.focus();
-          textarea.value = prompt;
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-          textarea.dispatchEvent(new Event('change', { bubbles: true }));
+          if (textarea) {
+            textarea.focus();
+            textarea.value = prompt;
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+            textarea.dispatchEvent(new Event('change', { bubbles: true }));
+          } else {
+            var editable = document.querySelector('[contenteditable=\"true\"]');
+            if (!editable) { return 'no_textarea'; }
+            editable.focus();
+            editable.textContent = prompt;
+            editable.dispatchEvent(new Event('input', { bubbles: true }));
+            editable.dispatchEvent(new Event('change', { bubbles: true }));
+          }
 
-          var form = textarea.closest('form');
+          var form = textarea ? textarea.closest('form') : null;
           var button = form ? form.querySelector('button[type=\"submit\"]:not([disabled])') : null;
           if (!button) {
             button = document.querySelector('button[data-testid=\"send-button\"]:not([disabled])');
