@@ -11,6 +11,8 @@ final class WebViewManager: NSObject, ObservableObject {
 
     let webView: WKWebView
 
+    private static let sharedProcessPool = WKProcessPool()
+
     private let refreshControl = UIRefreshControl()
     private var cancellables = Set<AnyCancellable>()
     private var lastConnectionState: Bool = true
@@ -23,6 +25,7 @@ final class WebViewManager: NSObject, ObservableObject {
         let configuration = WKWebViewConfiguration()
         // Use default data store so ChatGPT login cookies/local storage persist.
         configuration.websiteDataStore = .default()
+        configuration.processPool = Self.sharedProcessPool
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         configuration.preferences.javaScriptEnabled = true
         configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -70,10 +73,13 @@ final class WebViewManager: NSObject, ObservableObject {
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.allowsLinkPreview = false
-        webView.allowsBackForwardNavigationGestures = true
+        // Disable Safari-like edge-swipe navigation to feel less "web browser".
+        webView.allowsBackForwardNavigationGestures = false
         webView.scrollView.backgroundColor = .black
         webView.scrollView.alwaysBounceVertical = true
+        webView.scrollView.alwaysBounceHorizontal = false
         webView.scrollView.showsVerticalScrollIndicator = false
+        webView.scrollView.directionalLockEnabled = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.keyboardDismissMode = .interactive
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
@@ -123,23 +129,109 @@ final class WebViewManager: NSObject, ObservableObject {
         let source = """
         (function () {
           var styleId = 'ios-native-shell-style';
+
+          function ensureViewport() {
+            var meta = document.querySelector('meta[name="viewport"]');
+            var value = 'width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover';
+            if (!meta) {
+              meta = document.createElement('meta');
+              meta.name = 'viewport';
+              meta.content = value;
+              document.head.appendChild(meta);
+              return;
+            }
+            if (meta.content.indexOf('viewport-fit=cover') === -1) {
+              meta.content = value;
+            }
+          }
+
+          function pickVisibleComposerContainer() {
+            var textareas = document.querySelectorAll('textarea');
+            var bestTextArea = null;
+            var bestBottom = -Infinity;
+
+            for (var i = 0; i < textareas.length; i++) {
+              var ta = textareas[i];
+              var rect = ta.getBoundingClientRect();
+              if (rect.width <= 0 || rect.height <= 0) { continue; }
+              if (rect.bottom > bestBottom) {
+                bestBottom = rect.bottom;
+                bestTextArea = ta;
+              }
+            }
+
+            if (!bestTextArea) { return null; }
+
+            var current = bestTextArea;
+            for (var level = 0; level < 8 && current; level++) {
+              if (current.tagName === 'FORM') {
+                return current;
+              }
+              current = current.parentElement;
+            }
+
+            return bestTextArea.parentElement;
+          }
+
+          function pinComposer() {
+            var oldNode = document.querySelector('[data-ios-composer-pinned="1"]');
+            if (oldNode) {
+              oldNode.removeAttribute('data-ios-composer-pinned');
+            }
+
+            var composer = pickVisibleComposerContainer();
+            if (composer) {
+              composer.setAttribute('data-ios-composer-pinned', '1');
+            }
+          }
+
           function installStyle() {
             if (document.getElementById(styleId)) { return; }
             var style = document.createElement('style');
             style.id = styleId;
             style.textContent = `
               :root { color-scheme: dark !important; }
-              html, body { background: #000 !important; }
+              html, body {
+                background: #000 !important;
+                overscroll-behavior-y: none !important;
+              }
+              body {
+                -webkit-overflow-scrolling: touch !important;
+              }
               * { -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important; }
               header[role="banner"] { display: none !important; }
+              [data-ios-composer-pinned="1"] {
+                position: sticky !important;
+                bottom: 0 !important;
+                z-index: 999 !important;
+                padding-bottom: max(env(safe-area-inset-bottom), 8px) !important;
+                background: rgba(0, 0, 0, 0.9) !important;
+                backdrop-filter: blur(14px) !important;
+              }
             `;
             document.head.appendChild(style);
           }
 
+          function installBehavior() {
+            pinComposer();
+            var observer = new MutationObserver(function () {
+              pinComposer();
+            });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+            window.addEventListener('resize', pinComposer);
+            setInterval(pinComposer, 1400);
+          }
+
           if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', installStyle, { once: true });
+            document.addEventListener('DOMContentLoaded', function () {
+              ensureViewport();
+              installStyle();
+              installBehavior();
+            }, { once: true });
           } else {
+            ensureViewport();
             installStyle();
+            installBehavior();
           }
         })();
         """
