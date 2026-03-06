@@ -9,7 +9,10 @@ struct MainView: View {
             Color.black.ignoresSafeArea()
 
             WebViewContainer(webViewManager: webViewManager)
-                .ignoresSafeArea()
+                .ignoresSafeArea(.container, edges: .bottom)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    NativeTopBar(webViewManager: webViewManager)
+                }
                 .opacity(webViewManager.shouldShowSplash ? 0 : 1)
 
             if webViewManager.shouldShowSplash {
@@ -21,7 +24,7 @@ struct MainView: View {
             if !networkMonitor.isConnected {
                 // Lightweight network warning; auto-hides when connection returns.
                 NetworkErrorBanner()
-                    .padding(.top, 12)
+                    .padding(.top, 70)
                     .padding(.horizontal, 12)
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -29,6 +32,59 @@ struct MainView: View {
         .preferredColorScheme(.dark)
         .animation(.easeInOut(duration: 0.25), value: webViewManager.shouldShowSplash)
         .animation(.easeInOut(duration: 0.25), value: networkMonitor.isConnected)
+    }
+}
+
+private struct NativeTopBar: View {
+    @ObservedObject var webViewManager: WebViewManager
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                Button(action: webViewManager.goBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.headline.weight(.semibold))
+                }
+                .disabled(!webViewManager.canGoBack)
+                .opacity(webViewManager.canGoBack ? 1 : 0.35)
+
+                Spacer()
+
+                Text("ChatGPT")
+                    .font(.headline.weight(.semibold))
+                    .foregroundColor(.white)
+
+                Spacer()
+
+                HStack(spacing: 14) {
+                    Button(action: webViewManager.startNewChat) {
+                        Image(systemName: "plus.bubble")
+                            .font(.headline.weight(.semibold))
+                    }
+
+                    Button(action: webViewManager.reload) {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.headline.weight(.semibold))
+                    }
+                }
+            }
+            .foregroundColor(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 52)
+
+            if webViewManager.isPageLoading {
+                ProgressView(value: webViewManager.loadingProgress)
+                    .progressViewStyle(.linear)
+                    .tint(.white.opacity(0.85))
+                    .background(Color.white.opacity(0.1))
+            }
+        }
+        .background(Color.black.opacity(0.9))
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.white.opacity(0.12))
+                .frame(height: 0.5)
+        }
     }
 }
 
