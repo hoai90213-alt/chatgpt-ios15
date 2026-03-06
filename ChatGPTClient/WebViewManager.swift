@@ -3,11 +3,26 @@ import WebKit
 import Combine
 import UIKit
 
+struct NativeChatMessage: Identifiable, Equatable {
+    enum Role: String {
+        case user
+        case assistant
+        case system
+    }
+
+    let id: String
+    let role: Role
+    let content: String
+}
+
 final class WebViewManager: NSObject, ObservableObject {
     @Published private(set) var isInitialLoadFinished: Bool = false
     @Published private(set) var isPageLoading: Bool = true
     @Published private(set) var loadingProgress: Double = 0
     @Published private(set) var canGoBack: Bool = false
+    @Published private(set) var nativeMessages: [NativeChatMessage] = []
+    @Published private(set) var isComposerAvailable: Bool = false
+    @Published var showWebLoginSheet: Bool = false
 
     let webView: WKWebView
 
@@ -16,6 +31,18 @@ final class WebViewManager: NSObject, ObservableObject {
     private let refreshControl = UIRefreshControl()
     private var cancellables = Set<AnyCancellable>()
     private var lastConnectionState: Bool = true
+    private var syncTimer: Timer?
+    private var isSnapshotInFlight: Bool = false
+
+    private struct DOMSnapshot: Decodable {
+        let hasComposer: Bool
+        let messages: [DOMMessage]
+    }
+
+    private struct DOMMessage: Decodable {
+        let role: String
+        let content: String
+    }
 
     override init() {
         fatalError("Use init(networkMonitor:) instead.")
@@ -41,6 +68,7 @@ final class WebViewManager: NSObject, ObservableObject {
         configurePullToRefresh()
         bindWebViewState()
         bindNetworkState(networkMonitor)
+        startNativeSyncLoop()
         loadHomePage()
     }
 
@@ -61,9 +89,41 @@ final class WebViewManager: NSObject, ObservableObject {
         loadHomePage()
     }
 
+    func presentWebLogin() {
+        showWebLoginSheet = true
+    }
+
+    func sendNativeMessage(_ text: String) {
+        let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+
+        let promptLiteral = Self.jsStringLiteral(prompt)
+        let script = Self.sendMessageScript(promptLiteral: promptLiteral)
+
+        webView.evaluateJavaScript(script) { [weak self] result, _ in
+            guard let self else { return }
+
+            if let status = result as? String, status == "no_textarea" {
+                DispatchQueue.main.async {
+                    self.isComposerAvailable = false
+                    self.showWebLoginSheet = true
+                }
+                return
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.syncNativeSnapshot()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) { [weak self] in
+                self?.syncNativeSnapshot()
+            }
+        }
+    }
+
     func loadHomePage() {
         guard let url = URL(string: "https://chatgpt.com") else { return }
         let request = URLRequest(url: url)
+        isPageLoading = true
         webView.load(request)
     }
 
@@ -106,6 +166,47 @@ final class WebViewManager: NSObject, ObservableObject {
             .store(in: &cancellables)
     }
 
+    private func startNativeSyncLoop() {
+        guard syncTimer == nil else { return }
+
+        syncTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
+            self?.syncNativeSnapshot()
+        }
+
+        if let syncTimer {
+            RunLoop.main.add(syncTimer, forMode: .common)
+        }
+
+        syncNativeSnapshot()
+    }
+
+    private func syncNativeSnapshot() {
+        guard !isSnapshotInFlight else { return }
+        isSnapshotInFlight = true
+
+        webView.evaluateJavaScript(Self.nativeSnapshotScript) { [weak self] result, _ in
+            guard let self else { return }
+
+            defer {
+                self.isSnapshotInFlight = false
+            }
+
+            guard let json = result as? String, let data = json.data(using: .utf8) else { return }
+            guard let snapshot = try? JSONDecoder().decode(DOMSnapshot.self, from: data) else { return }
+
+            let mappedMessages = Self.mapSnapshotToNativeMessages(snapshot.messages)
+
+            DispatchQueue.main.async {
+                self.isComposerAvailable = snapshot.hasComposer
+                self.nativeMessages = mappedMessages
+
+                if snapshot.hasComposer && self.showWebLoginSheet {
+                    self.showWebLoginSheet = false
+                }
+            }
+        }
+    }
+
     private func bindNetworkState(_ monitor: NetworkMonitor) {
         monitor.$isConnected
             .receive(on: DispatchQueue.main)
@@ -145,46 +246,6 @@ final class WebViewManager: NSObject, ObservableObject {
             }
           }
 
-          function pickVisibleComposerContainer() {
-            var textareas = document.querySelectorAll('textarea');
-            var bestTextArea = null;
-            var bestBottom = -Infinity;
-
-            for (var i = 0; i < textareas.length; i++) {
-              var ta = textareas[i];
-              var rect = ta.getBoundingClientRect();
-              if (rect.width <= 0 || rect.height <= 0) { continue; }
-              if (rect.bottom > bestBottom) {
-                bestBottom = rect.bottom;
-                bestTextArea = ta;
-              }
-            }
-
-            if (!bestTextArea) { return null; }
-
-            var current = bestTextArea;
-            for (var level = 0; level < 8 && current; level++) {
-              if (current.tagName === 'FORM') {
-                return current;
-              }
-              current = current.parentElement;
-            }
-
-            return bestTextArea.parentElement;
-          }
-
-          function pinComposer() {
-            var oldNode = document.querySelector('[data-ios-composer-pinned="1"]');
-            if (oldNode) {
-              oldNode.removeAttribute('data-ios-composer-pinned');
-            }
-
-            var composer = pickVisibleComposerContainer();
-            if (composer) {
-              composer.setAttribute('data-ios-composer-pinned', '1');
-            }
-          }
-
           function installStyle() {
             if (document.getElementById(styleId)) { return; }
             var style = document.createElement('style');
@@ -200,42 +261,119 @@ final class WebViewManager: NSObject, ObservableObject {
               }
               * { -webkit-tap-highlight-color: rgba(0, 0, 0, 0) !important; }
               header[role="banner"] { display: none !important; }
-              [data-ios-composer-pinned="1"] {
-                position: sticky !important;
-                bottom: 0 !important;
-                z-index: 999 !important;
-                padding-bottom: max(env(safe-area-inset-bottom), 8px) !important;
-                background: rgba(0, 0, 0, 0.9) !important;
-                backdrop-filter: blur(14px) !important;
-              }
             `;
             document.head.appendChild(style);
-          }
-
-          function installBehavior() {
-            pinComposer();
-            var observer = new MutationObserver(function () {
-              pinComposer();
-            });
-            observer.observe(document.documentElement, { childList: true, subtree: true });
-            window.addEventListener('resize', pinComposer);
-            setInterval(pinComposer, 1400);
           }
 
           if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', function () {
               ensureViewport();
               installStyle();
-              installBehavior();
             }, { once: true });
           } else {
             ensureViewport();
             installStyle();
-            installBehavior();
           }
         })();
         """
         return WKUserScript(source: source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+    }
+
+    private static var nativeSnapshotScript: String {
+        """
+        (function () {
+          function cleanText(value) {
+            if (!value) { return ''; }
+            return String(value)
+              .replace(/\\u00a0/g, ' ')
+              .replace(/\\n{3,}/g, '\\n\\n')
+              .trim();
+          }
+
+          var messages = [];
+          var nodes = document.querySelectorAll('[data-message-author-role]');
+          for (var i = 0; i < nodes.length; i++) {
+            var node = nodes[i];
+            var role = node.getAttribute('data-message-author-role') || 'assistant';
+            var content = cleanText(node.innerText || node.textContent || '');
+            if (!content) { continue; }
+            messages.push({ role: role, content: content });
+          }
+
+          if (messages.length === 0) {
+            var fallbackBlocks = document.querySelectorAll('main article');
+            for (var j = 0; j < fallbackBlocks.length; j++) {
+              var fallbackContent = cleanText(fallbackBlocks[j].innerText || fallbackBlocks[j].textContent || '');
+              if (!fallbackContent) { continue; }
+              messages.push({
+                role: j % 2 === 0 ? 'assistant' : 'user',
+                content: fallbackContent
+              });
+            }
+          }
+
+          var hasComposer = !!document.querySelector('textarea');
+          return JSON.stringify({
+            hasComposer: hasComposer,
+            messages: messages.slice(-80)
+          });
+        })();
+        """
+    }
+
+    private static func sendMessageScript(promptLiteral: String) -> String {
+        """
+        (function () {
+          var textarea = document.querySelector('textarea');
+          if (!textarea) { return 'no_textarea'; }
+
+          var prompt = \(promptLiteral);
+          textarea.focus();
+          textarea.value = prompt;
+          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+          textarea.dispatchEvent(new Event('change', { bubbles: true }));
+
+          var form = textarea.closest('form');
+          var button = form ? form.querySelector('button[type=\"submit\"]:not([disabled])') : null;
+          if (!button) {
+            button = document.querySelector('button[data-testid=\"send-button\"]:not([disabled])');
+          }
+
+          if (button) {
+            button.click();
+            return 'sent';
+          }
+
+          var enterEvent = new KeyboardEvent('keydown', {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            which: 13,
+            bubbles: true
+          });
+          textarea.dispatchEvent(enterEvent);
+          return 'enter';
+        })();
+        """
+    }
+
+    private static func jsStringLiteral(_ value: String) -> String {
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        return "\"\(escaped)\""
+    }
+
+    private static func mapSnapshotToNativeMessages(_ messages: [DOMMessage]) -> [NativeChatMessage] {
+        messages.enumerated().compactMap { index, message in
+            let content = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !content.isEmpty else { return nil }
+
+            let role = NativeChatMessage.Role(rawValue: message.role) ?? .assistant
+            return NativeChatMessage(id: "msg-\(index)-\(role.rawValue)", role: role, content: content)
+        }
     }
 
     private func shouldOpenInsideApp(_ url: URL) -> Bool {
@@ -249,6 +387,10 @@ final class WebViewManager: NSObject, ObservableObject {
             "cdn.oaistatic.com"
         ]
         return allowedHosts.contains(where: { host == $0 || host.hasSuffix(".\($0)") })
+    }
+
+    deinit {
+        syncTimer?.invalidate()
     }
 }
 
@@ -289,6 +431,11 @@ extension WebViewManager: WKNavigationDelegate, WKUIDelegate {
             return
         }
 
+        if showWebLoginSheet {
+            decisionHandler(.allow)
+            return
+        }
+
         if shouldOpenInsideApp(url) {
             decisionHandler(.allow)
             return
@@ -305,7 +452,7 @@ extension WebViewManager: WKNavigationDelegate, WKUIDelegate {
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         if navigationAction.targetFrame == nil, let url = navigationAction.request.url {
-            if shouldOpenInsideApp(url) {
+            if showWebLoginSheet || shouldOpenInsideApp(url) {
                 webView.load(URLRequest(url: url))
             } else {
                 UIApplication.shared.open(url)
