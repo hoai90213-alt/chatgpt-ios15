@@ -49,6 +49,12 @@ jobs:
             echo "No .app found in archive"
             exit 1
           fi
+          EXECUTABLE_NAME=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$APP_PATH/Info.plist")
+          if [ -z "$EXECUTABLE_NAME" ] || [ ! -f "$APP_PATH/$EXECUTABLE_NAME" ]; then
+            echo "Unable to locate main binary inside app bundle"
+            ls -la "$APP_PATH"
+            exit 1
+          fi
           cp -R "$APP_PATH" build/export/Payload/
           cd build/export
           /usr/bin/zip -r ChatGPTClient.ipa Payload
