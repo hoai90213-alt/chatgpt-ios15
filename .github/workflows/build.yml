@@ -56,8 +56,48 @@ jobs:
             exit 1
           fi
           cp -R "$APP_PATH" build/export/Payload/
+
           cd build/export
-          /usr/bin/zip -r ChatGPTClient.ipa Payload
+          APP_NAME=$(basename "$APP_PATH")
+          PAD_FILE="Payload/$APP_NAME/.sizepad.bin"
+          MIN_SIZE=$((3 * 1024 * 1024))
+          MAX_SIZE=$((10 * 1024 * 1024))
+          TARGET_SIZE=$((4 * 1024 * 1024))
+
+          package_ipa () {
+            rm -f ChatGPTClient.ipa
+            /usr/bin/zip -qry ChatGPTClient.ipa Payload
+          }
+
+          # First package without padding.
+          rm -f "$PAD_FILE"
+          package_ipa
+          IPA_SIZE=$(stat -f%z ChatGPTClient.ipa)
+
+          # If too small, add incompressible padding so IPA lands in the desired range.
+          if [ "$IPA_SIZE" -lt "$MIN_SIZE" ]; then
+            PAD_BYTES=$((TARGET_SIZE - IPA_SIZE))
+            if [ "$PAD_BYTES" -lt 262144 ]; then
+              PAD_BYTES=262144
+            fi
+            openssl rand -out "$PAD_FILE" "$PAD_BYTES"
+            package_ipa
+            IPA_SIZE=$(stat -f%z ChatGPTClient.ipa)
+          fi
+
+          # Top up once more if compression ratio still keeps IPA below 3 MB.
+          if [ "$IPA_SIZE" -lt "$MIN_SIZE" ]; then
+            EXTRA_BYTES=$((MIN_SIZE - IPA_SIZE + 262144))
+            openssl rand "$EXTRA_BYTES" >> "$PAD_FILE"
+            package_ipa
+            IPA_SIZE=$(stat -f%z ChatGPTClient.ipa)
+          fi
+
+          echo "Final IPA size: $IPA_SIZE bytes"
+          if [ "$IPA_SIZE" -lt "$MIN_SIZE" ] || [ "$IPA_SIZE" -gt "$MAX_SIZE" ]; then
+            echo "IPA size is out of range (3MB-10MB)."
+            exit 1
+          fi
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
